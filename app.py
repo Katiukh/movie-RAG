@@ -8,16 +8,23 @@ import streamlit as st
 
 from movie_rag.retrieval.bm25 import BM25Retriever, load_movies
 from movie_rag.retrieval.dense import DenseRetriever
+from movie_rag.retrieval.hybrid import HybridRetriever
 
 ROOT = Path(__file__).resolve().parent
 CORPUS = ROOT / "data/processed/movies.jsonl"
 DENSE = "Dense — BGE-M3"
+HYBRID = "Hybrid"
 
 
 @st.cache_resource(show_spinner=False)
 def get_retriever(method: str, corpus_path: str, corpus_fingerprint: str):
     # The fingerprint is part of Streamlit's cache key, so corpus edits invalidate
     # the in-memory retriever. DenseRetriever separately validates its disk cache.
+    if method == HYBRID:
+        return HybridRetriever(
+            get_retriever("BM25", corpus_path, corpus_fingerprint),
+            get_retriever(DENSE, corpus_path, corpus_fingerprint),
+        )
     movies = load_movies(Path(corpus_path))
     if method == DENSE:
         return DenseRetriever(movies, cache_dir=ROOT / "data/embeddings")
@@ -41,7 +48,22 @@ def render_message(message: dict) -> None:
             with st.expander(
                 f"{rank}. {movie['title']} ({movie['year']})", expanded=rank == 1
             ):
-                st.caption(f"{score_label}: {movie['score']:.4f}")
+                if message["method"] == HYBRID:
+                    st.caption(
+                        f"RRF: {movie['rrf_score']:.6f} · "
+                        f"BM25 rank: {movie['bm25_rank'] or '—'} · "
+                        f"Dense rank: {movie['dense_rank'] or '—'}"
+                    )
+                    with st.expander("Исходные оценки"):
+                        for label, field in (
+                            ("BM25 score", "bm25_score"),
+                            ("Dense score", "dense_score"),
+                        ):
+                            score = movie[field]
+                            value = "—" if score is None else f"{score:.4f}"
+                            st.caption(f"{label}: {value}")
+                else:
+                    st.caption(f"{score_label}: {movie['score']:.4f}")
                 for label, field in [
                     ("ЧТО", "what"),
                     ("О ЧЁМ", "about"),
@@ -57,7 +79,7 @@ def main() -> None:
     st.title("Movie RAG")
     st.write("Найди фильм по описанию, настроению или сюжету.")
     st.caption("Каждый запрос — новый поиск. История ниже не влияет на результаты.")
-    method = st.sidebar.radio("Retrieval method", [DENSE, "BM25"])
+    method = st.sidebar.radio("Retrieval method", [DENSE, "BM25", HYBRID])
     top_k = st.sidebar.selectbox("Number of results", [3, 5, 10], index=1)
     if st.sidebar.button("Очистить историю"):
         st.session_state.messages = []
@@ -77,8 +99,9 @@ def main() -> None:
             "при первой загрузке модели. Можно попробовать другой метод в боковой панели."
         )
         st.stop()
-    if method == DENSE:
-        st.sidebar.caption(f"Embedding device: {retriever.device}")
+    if method in (DENSE, HYBRID):
+        dense = retriever.dense_retriever if method == HYBRID else retriever
+        st.sidebar.caption(f"Embedding device: {dense.device}")
 
     query = st.chat_input("Какое кино хочется посмотреть?")
     if query and query.strip():
