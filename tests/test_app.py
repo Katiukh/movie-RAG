@@ -81,3 +81,32 @@ def test_reruns_reuse_dense_resource(app_test):
     assert not app.exception
     assert calls["dense_init"] == 1
     assert calls["queries"] == [("dense", "дорога", 5), ("dense", "интернет", 5)]
+
+
+def test_hybrid_reuses_both_resources_and_preserves_history(app_test):
+    app, calls = app_test
+    app.run()
+    app.chat_input[0].set_value("dense query").run()
+    assert "Hybrid" in app.sidebar.radio[0].options
+    app.sidebar.radio[0].set_value("Hybrid").run()
+    app.chat_input[0].set_value("hybrid query").run()
+    assert not app.exception
+    results = app.session_state.messages[-1]["results"]
+    assert len(results) == 5
+    assert results[0]["rrf_score"] == pytest.approx(2 / 61)
+    assert results[0]["bm25_rank"] == results[0]["dense_rank"] == 1
+    assert calls["queries"][-2:] == [
+        ("bm25", "hybrid query", 20),
+        ("dense", "hybrid query", 20),
+    ]
+    captions = " ".join(c.value for c in app.caption)
+    assert "RRF" in captions and "BM25 rank" in captions and "Dense rank" in captions
+    assert "Similarity" in captions
+    app.sidebar.radio[0].set_value("BM25").run()
+    app.chat_input[0].set_value("lexical query").run()
+    app.sidebar.radio[0].set_value("Dense — BGE-M3").run()
+    assert not app.exception
+    assert calls["dense_init"] == calls["bm25_init"] == 1
+    assert [
+        m["method"] for m in app.session_state.messages if m["role"] == "assistant"
+    ] == ["Dense — BGE-M3", "Hybrid", "BM25"]
