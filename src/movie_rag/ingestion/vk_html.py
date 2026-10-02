@@ -2,7 +2,6 @@ from pathlib import Path
 
 import requests
 
-
 URL = "https://vk.ru/cinemafromivan"
 
 HEADERS = {

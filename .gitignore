@@ -53,3 +53,6 @@ Thumbs.db
 
 # Windows download metadata
 *:Zone.Identifier
+
+reports/*
+!reports/reranker-comparison.md

@@ -110,3 +110,46 @@ def test_hybrid_reuses_both_resources_and_preserves_history(app_test):
     assert [
         m["method"] for m in app.session_state.messages if m["role"] == "assistant"
     ] == ["Dense — BGE-M3", "Hybrid", "BM25"]
+
+
+def test_reranked_mode_scores_candidates_reuses_model_and_keeps_history(
+    app_test, monkeypatch
+):
+    from movie_rag.retrieval import reranker
+
+    app, calls = app_test
+    calls["reranker_init"] = 0
+    calls["rerank_pairs"] = []
+
+    class Scorer:
+        device = "cpu"
+
+        def __init__(self, **kwargs):
+            calls["reranker_init"] += 1
+
+        def score(self, pairs):
+            calls["rerank_pairs"].append(pairs)
+            return [i / len(pairs) for i in range(len(pairs))]
+
+    monkeypatch.setattr(reranker, "TransformersScorer", Scorer)
+    app.run()
+    app.sidebar.radio[0].set_value("Hybrid").run()
+    app.chat_input[0].set_value("before").run()
+    assert "Hybrid + Reranker" in app.sidebar.radio[0].options
+    app.sidebar.radio[0].set_value("Hybrid + Reranker").run()
+    app.chat_input[0].set_value("after").run()
+    assert not app.exception
+    result = app.session_state.messages[-1]["results"]
+    assert len(result) == 5
+    assert result[0]["hybrid_rank"] == 20
+    assert result[0]["reranker_score"] == pytest.approx(0.95)
+    assert len(calls["rerank_pairs"][0]) == 20
+    captions = " ".join(c.value for c in app.caption)
+    assert "Reranker score" in captions and "Hybrid rank" in captions
+    app.run()
+    app.sidebar.radio[0].set_value("BM25").run()
+    app.sidebar.radio[0].set_value("Hybrid + Reranker").run()
+    assert not app.exception
+    assert calls["dense_init"] == calls["bm25_init"] == calls["reranker_init"] == 1
+    assert app.session_state.messages[1]["method"] == "Hybrid"
+    assert app.session_state.messages[3]["method"] == "Hybrid + Reranker"
