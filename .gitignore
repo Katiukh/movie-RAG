@@ -34,6 +34,9 @@ coverage.xml
 # Rebuildable dense embeddings
 /data/embeddings/
 
+# Reproducible retrieval benchmark run artifacts
+/artifacts/eval/
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 
@@ -55,4 +58,4 @@ Thumbs.db
 *:Zone.Identifier
 
 reports/*
-!reports/reranker-comparison.md
+!reports/retrieval-benchmark-comparison.md
