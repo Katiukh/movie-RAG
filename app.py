@@ -5,7 +5,9 @@ import logging
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
+from movie_rag.generation import Recommender, RecommenderError
 from movie_rag.retrieval.bm25 import BM25Retriever, load_movies
 from movie_rag.retrieval.dense import DenseRetriever
 from movie_rag.retrieval.hybrid import HybridRetriever
@@ -51,80 +53,43 @@ def render_message(message: dict) -> None:
             st.error(message["error"])
             return
         results = message["results"]
-        st.caption(f"{message['method']} · Найдено фильмов: {len(results)}")
+        st.caption(f"Подходящих фильмов: {len(results)}")
         if not results:
-            st.write("По этому запросу ничего не найдено. Попробуйте другое описание.")
-        score_label = "Similarity" if message["method"] == DENSE else "BM25 score"
+            st.write(
+                "Среди найденных фильмов не нашлось вариантов, которые достаточно "
+                "хорошо соответствуют запросу."
+            )
         for rank, movie in enumerate(results, 1):
             with st.expander(
                 f"{rank}. {movie['title']} ({movie['year']})", expanded=rank == 1
             ):
-                if message["method"] == RERANKED:
-                    st.caption(f"Reranker score: {movie['reranker_score']:.6f}")
-                    with st.expander("Ранги до reranking"):
-                        st.caption(
-                            f"Hybrid rank: {movie['hybrid_rank']} · "
-                            f"RRF: {movie['rrf_score']:.6f} · "
-                            f"BM25 rank: {movie['bm25_rank'] or '—'} · "
-                            f"Dense rank: {movie['dense_rank'] or '—'}"
-                        )
-                elif message["method"] == HYBRID:
-                    st.caption(
-                        f"RRF: {movie['rrf_score']:.6f} · "
-                        f"BM25 rank: {movie['bm25_rank'] or '—'} · "
-                        f"Dense rank: {movie['dense_rank'] or '—'}"
-                    )
-                    with st.expander("Исходные оценки"):
-                        for label, field in (
-                            ("BM25 score", "bm25_score"),
-                            ("Dense score", "dense_score"),
-                        ):
-                            score = movie[field]
-                            value = "—" if score is None else f"{score:.4f}"
-                            st.caption(f"{label}: {value}")
-                else:
-                    st.caption(f"{score_label}: {movie['score']:.4f}")
-                for label, field in [
-                    ("ЧТО", "what"),
-                    ("О ЧЁМ", "about"),
-                    ("ЗАЧЕМ", "why"),
-                ]:
-                    st.markdown(f"**{label}:**")
-                    st.write(movie.get(field) or "—")
+                if movie.get("what"):
+                    st.text(movie["what"])
+                for field, label in (
+                    ("about", "О чём"),
+                    ("why", "Почему стоит посмотреть"),
+                    ("not_for", "Кому может не подойти"),
+                ):
+                    if movie.get(field):
+                        st.markdown(f"**{label}:**")
+                        st.text(movie[field])
                 st.link_button("Открыть источник", movie["url"])
 
 
 def main() -> None:
+    load_dotenv(ROOT / ".env", override=False)
     st.set_page_config(page_title="Movie RAG", page_icon="🎬")
     st.title("Movie RAG")
     st.write("Найди фильм по описанию, настроению или сюжету.")
     st.caption("Каждый запрос — новый поиск. История ниже не влияет на результаты.")
-    method = st.sidebar.radio("Retrieval method", [DENSE, "BM25", HYBRID, RERANKED])
-    top_k = st.sidebar.selectbox("Number of results", [3, 5, 10], index=1)
     if st.sidebar.button("Очистить историю"):
         st.session_state.messages = []
-    if "messages" not in st.session_state:
+    # Discard older sessions with model-generated explanations.
+    if st.session_state.get("recommendation_flow_version") != 4:
         st.session_state.messages = []
+        st.session_state.recommendation_flow_version = 4
     for message in st.session_state.messages:
         render_message(message)
-
-    try:
-        fingerprint = hashlib.sha256(CORPUS.read_bytes()).hexdigest()
-        with st.spinner("Подготавливаю поиск…"):
-            retriever = get_retriever(method, str(CORPUS), fingerprint)
-    except Exception:
-        logging.getLogger(__name__).exception("Could not initialize retrieval")
-        st.error(
-            "Не удалось подготовить поиск. Проверьте файл корпуса и соединение "
-            "при первой загрузке модели. Можно попробовать другой метод в боковой панели."
-        )
-        st.stop()
-    if method in (DENSE, HYBRID, RERANKED):
-        base = retriever.hybrid_retriever if method == RERANKED else retriever
-        dense = base if method == DENSE else base.dense_retriever
-        st.sidebar.caption(f"Embedding device: {dense.device}")
-    if method == RERANKED:
-        st.sidebar.caption(f"Reranker device: {retriever.reranker.device}")
 
     query = st.chat_input("Какое кино хочется посмотреть?")
     if query and query.strip():
@@ -133,14 +98,22 @@ def main() -> None:
         st.session_state.messages.append(user_message)
         render_message(user_message)
         try:
+            recommender = Recommender.from_env()
+            fingerprint = hashlib.sha256(CORPUS.read_bytes()).hexdigest()
+            with st.spinner("Подготавливаю поиск…"):
+                retriever = get_retriever(RERANKED, str(CORPUS), fingerprint)
             with st.spinner("Ищу фильмы…"):
-                results = retriever.search(query, top_k=top_k)
-            answer = {"role": "assistant", "method": method, "results": results}
+                candidates = retriever.search(query, top_k=10)
+            with st.spinner("Проверяю соответствие запросу…"):
+                results = recommender.recommend(query=query, candidates=candidates[:10])
+            answer = {"role": "assistant", "results": results}
+        except RecommenderError as exc:
+            answer = {"role": "assistant", "error": str(exc)}
         except Exception:
             logging.getLogger(__name__).exception("Search failed")
             answer = {
                 "role": "assistant",
-                "error": "Поиск не выполнился. Попробуйте ещё раз или смените метод.",
+                "error": "Поиск не выполнился. Проверьте корпус и загрузку моделей или попробуйте ещё раз.",
             }
         st.session_state.messages.append(answer)
         render_message(answer)

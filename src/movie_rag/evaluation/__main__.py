@@ -1,4 +1,4 @@
-"""Validate the retrieval gold dataset or evaluate an existing search backend."""
+"""Evaluate search backends or the local LLM filter on the same gold dataset."""
 
 import argparse
 import hashlib
@@ -25,6 +25,8 @@ from movie_rag.retrieval.dense import DEFAULT_CACHE
 
 DEFAULT_OUTPUT = Path("artifacts/eval/retrieval_results.jsonl")
 DEFAULT_SUMMARY = Path("artifacts/eval/retrieval_summary.json")
+DEFAULT_LLM_OUTPUT = Path("artifacts/eval/llm_results.jsonl")
+DEFAULT_LLM_SUMMARY = Path("artifacts/eval/llm_summary.json")
 
 
 def _same_file(left: Path, right: Path) -> bool:
@@ -36,6 +38,14 @@ def _same_file(left: Path, right: Path) -> bool:
 def _build_retriever(args, movies):
     if args.retriever == "bm25":
         return BM25Retriever(movies)
+    if args.retriever == "llm":
+        from dotenv import load_dotenv
+
+        from movie_rag.generation import Recommender
+
+        load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
+        # Reject invalid local settings before loading retrieval models.
+        recommender = Recommender.from_env()
     from movie_rag.retrieval.dense import DenseRetriever
 
     dense = DenseRetriever(movies, cache_dir=args.cache_dir, batch_size=args.batch_size)
@@ -50,7 +60,7 @@ def _build_retriever(args, movies):
         return hybrid
     from movie_rag.retrieval.reranker import RerankedHybridRetriever, Reranker
 
-    return RerankedHybridRetriever(
+    reranked = RerankedHybridRetriever(
         hybrid,
         Reranker(
             batch_size=args.reranker_batch_size,
@@ -59,6 +69,11 @@ def _build_retriever(args, movies):
         ),
         candidate_k=args.candidate_k,
     )
+    if args.retriever == "llm":
+        from movie_rag.evaluation.llm import LLMFilteredRetriever
+
+        return LLMFilteredRetriever(reranked, recommender)
+    return reranked
 
 
 def _print_summary(result):
@@ -99,11 +114,13 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
-        "--retriever", choices=("bm25", "dense", "hybrid", "reranker"), default="bm25"
+        "--retriever",
+        choices=("bm25", "dense", "hybrid", "reranker", "llm"),
+        default="bm25",
     )
     parser.add_argument("--ks", type=int, nargs="+", default=list(DEFAULT_KS))
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--summary-output", type=Path, default=DEFAULT_SUMMARY)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--summary-output", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -113,12 +130,20 @@ def main() -> None:
     parser.add_argument("--reranker-max-length", type=int, default=512)
     parser.add_argument("--reranker-device", choices=("cpu", "cuda"))
     args = parser.parse_args()
+    if args.output is None:
+        args.output = DEFAULT_LLM_OUTPUT if args.retriever == "llm" else DEFAULT_OUTPUT
+    if args.summary_output is None:
+        args.summary_output = (
+            DEFAULT_LLM_SUMMARY if args.retriever == "llm" else DEFAULT_SUMMARY
+        )
     if not args.ks or min(args.ks) < 1 or len(set(args.ks)) != len(args.ks):
         parser.error("--ks must contain distinct positive integers")
     if args.batch_size < 1 or args.candidate_k < 1 or args.rrf_k < 0:
         parser.error("batch-size/candidate-k must be >= 1; rrf-k must be >= 0")
     if args.reranker_batch_size < 1 or args.reranker_max_length < 1:
         parser.error("reranker-batch-size/reranker-max-length must be >= 1")
+    if args.retriever == "llm" and args.candidate_k != 20:
+        parser.error("LLM evaluation requires --candidate-k 20, as in the application")
     protected = {
         path.resolve()
         for path in (args.dataset, args.corpus, DEFAULT_DATASET, DEFAULT_CANDIDATES)
@@ -176,17 +201,33 @@ def main() -> None:
                 batch_size=args.batch_size,
                 cache_dir=str(args.cache_dir),
             )
-        if args.retriever in ("hybrid", "reranker"):
+        if args.retriever in ("hybrid", "reranker", "llm"):
             result["run"].update(candidate_k=args.candidate_k, rrf_k=args.rrf_k)
-        if args.retriever == "reranker":
+        if args.retriever in ("reranker", "llm"):
             from movie_rag.retrieval.reranker import MODEL_NAME as RERANKER_MODEL_NAME
 
+            reranked = retriever.retriever if args.retriever == "llm" else retriever
             result["run"].update(
                 reranker_model=RERANKER_MODEL_NAME,
                 rerank_candidate_k=args.candidate_k,
                 reranker_batch_size=args.reranker_batch_size,
                 reranker_max_length=args.reranker_max_length,
-                reranker_device=retriever.reranker.device,
+                reranker_device=reranked.reranker.device,
+            )
+        if args.retriever == "llm":
+            from movie_rag.generation.prompts import SYSTEM_PROMPT, build_messages
+            from movie_rag.generation.recommender import MAX_CANDIDATES
+
+            recommender = retriever.recommender
+            # Unlike the retrieval fingerprint, this also includes not_for.
+            corpus_payload = build_messages("", movies)[1]["content"]
+            result["run"].update(
+                llm_model=recommender.model,
+                llm_base_url=recommender.base_url,
+                llm_timeout_seconds=recommender.timeout_seconds,
+                llm_candidate_k=MAX_CANDIDATES,
+                llm_prompt_sha256=hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
+                llm_corpus_sha256=hashlib.sha256(corpus_payload.encode()).hexdigest(),
             )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.summary_output.parent.mkdir(parents=True, exist_ok=True)
