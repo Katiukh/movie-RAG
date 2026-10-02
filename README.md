@@ -1,5 +1,49 @@
 # movie-rag
 
+## Retrieval benchmark
+
+Независимый benchmark содержит 50 запросов по текущему корпусу: 10 near_exact,
+25 paraphrase, 15 semantic; 9 semantic-запросов имеют по 2–5 positives.
+Разметка использует существующие URL документов;
+основания релевантности сохранены в `notes`. Кандидаты и проверенный gold лежат
+в `data/eval/`. [Методика, ограничения и обновление](data/eval/README.md).
+[Сравнение BM25, Dense, Hybrid и reranker: overall и все типы запросов](reports/retrieval-benchmark-comparison.md).
+
+```bash
+uv run python -m movie_rag.evaluation --validate-only
+uv run python -m movie_rag.evaluation --retriever bm25
+uv run python -m movie_rag.evaluation --retriever dense \
+  --output artifacts/eval/dense_results.jsonl \
+  --summary-output artifacts/eval/dense_summary.json
+uv run python -m movie_rag.evaluation --retriever hybrid \
+  --output artifacts/eval/hybrid_results.jsonl \
+  --summary-output artifacts/eval/hybrid_summary.json
+uv run python -m movie_rag.evaluation --retriever reranker \
+  --output artifacts/eval/reranker_results.jsonl \
+  --summary-output artifacts/eval/reranker_summary.json
+```
+
+CLI печатает Recall@1/3/5/10/20 overall и по каждому типу query, сохраняет ranking
+и метрики каждого запроса для error analysis, а также summary с хешами входных
+данных. Без параметров запускается BM25. Общие флаги: `--dataset`, `--corpus`,
+`--ks`; Dense/Hybrid используют существующий кэш через `--cache-dir` и
+`--batch-size`, Hybrid — прежние `--candidate-k 20`, `--rrf-k 60`.
+Режим `reranker` оценивает существующий Hybrid + BGE reranker на 20 кандидатах.
+Его inference-флаги: `--reranker-batch-size 4`, `--reranker-max-length 512`,
+`--reranker-device cpu|cuda` (по умолчанию автоматический выбор).
+Retrieval pipeline и gold не изменяются при оценке.
+
+```python
+from pathlib import Path
+from movie_rag.evaluation import evaluate_retriever, load_eval_dataset
+from movie_rag.retrieval.bm25 import BM25Retriever, load_movies
+
+movies = load_movies(Path("data/processed/movies.jsonl"))
+dataset = load_eval_dataset(Path("data/eval/retrieval_eval.jsonl"), movies)
+results = evaluate_retriever(BM25Retriever(movies), dataset, ks=[1, 3, 5, 10, 20])
+# results["overall"], results["by_query_type"], results["per_query"]
+```
+
 Сбор movie-постов публичного VK-сообщества через Playwright для semantic search / RAG.
 Python 3.12+, зависимости устанавливаются через `uv sync`, браузер — через
 `uv run playwright install chromium`.
