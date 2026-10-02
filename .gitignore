@@ -37,6 +37,13 @@ coverage.xml
 # Reproducible retrieval benchmark run artifacts
 /artifacts/eval/
 
+# Local logs, recordings and downloaded model weights
+*.log
+/recordings/
+/models/
+*.gguf
+*.safetensors
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 
@@ -49,12 +56,10 @@ coverage.xml
 Thumbs.db
 /superpowers/plans/
 
-# Documentation and local datasets
-/docs/
+# Internal working notes and local datasets
+/docs/superpowers/
 /data/raw/
 /data/eval_queries_50.jsonl
 
 # Windows download metadata
 *:Zone.Identifier
-
-reports/*

@@ -188,7 +188,7 @@ Overall Recall@1 вырос с 0.841 до 0.852 (+1.17 п.п.), а Recall@10 с�
 - Индексируемый corpus SHA-256: `1c7af0f7e7c38f6e8b85baab571b405af16765d95ca047f81ddeb7a58830d5e2`.
 
 Артефакты запусков локальные и исключены из Git. Для повторной оценки
-используйте [команды benchmark](../README.md#retrieval-benchmark) с отдельными
+используйте [команды benchmark](../docs/technical-notes.md#retrieval-benchmark) с отдельными
 output paths для каждого режима. LLM запускается с отдельными output paths
 по умолчанию:
 
