@@ -2,7 +2,6 @@ import json
 import re
 from pathlib import Path
 
-
 TITLE_PATTERN = re.compile(
     r"(?P<title>.+?)\s*\((?P<year>\d{4})\)"
 )

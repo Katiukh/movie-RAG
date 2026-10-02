@@ -9,17 +9,28 @@ import streamlit as st
 from movie_rag.retrieval.bm25 import BM25Retriever, load_movies
 from movie_rag.retrieval.dense import DenseRetriever
 from movie_rag.retrieval.hybrid import HybridRetriever
+from movie_rag.retrieval.reranker import RerankedHybridRetriever, Reranker
 
 ROOT = Path(__file__).resolve().parent
 CORPUS = ROOT / "data/processed/movies.jsonl"
 DENSE = "Dense — BGE-M3"
 HYBRID = "Hybrid"
+RERANKED = "Hybrid + Reranker"
+
+
+@st.cache_resource(show_spinner=False)
+def get_reranker():
+    return Reranker()
 
 
 @st.cache_resource(show_spinner=False)
 def get_retriever(method: str, corpus_path: str, corpus_fingerprint: str):
     # The fingerprint is part of Streamlit's cache key, so corpus edits invalidate
     # the in-memory retriever. DenseRetriever separately validates its disk cache.
+    if method == RERANKED:
+        return RerankedHybridRetriever(
+            get_retriever(HYBRID, corpus_path, corpus_fingerprint), get_reranker()
+        )
     if method == HYBRID:
         return HybridRetriever(
             get_retriever("BM25", corpus_path, corpus_fingerprint),
@@ -48,7 +59,16 @@ def render_message(message: dict) -> None:
             with st.expander(
                 f"{rank}. {movie['title']} ({movie['year']})", expanded=rank == 1
             ):
-                if message["method"] == HYBRID:
+                if message["method"] == RERANKED:
+                    st.caption(f"Reranker score: {movie['reranker_score']:.6f}")
+                    with st.expander("Ранги до reranking"):
+                        st.caption(
+                            f"Hybrid rank: {movie['hybrid_rank']} · "
+                            f"RRF: {movie['rrf_score']:.6f} · "
+                            f"BM25 rank: {movie['bm25_rank'] or '—'} · "
+                            f"Dense rank: {movie['dense_rank'] or '—'}"
+                        )
+                elif message["method"] == HYBRID:
                     st.caption(
                         f"RRF: {movie['rrf_score']:.6f} · "
                         f"BM25 rank: {movie['bm25_rank'] or '—'} · "
@@ -79,7 +99,7 @@ def main() -> None:
     st.title("Movie RAG")
     st.write("Найди фильм по описанию, настроению или сюжету.")
     st.caption("Каждый запрос — новый поиск. История ниже не влияет на результаты.")
-    method = st.sidebar.radio("Retrieval method", [DENSE, "BM25", HYBRID])
+    method = st.sidebar.radio("Retrieval method", [DENSE, "BM25", HYBRID, RERANKED])
     top_k = st.sidebar.selectbox("Number of results", [3, 5, 10], index=1)
     if st.sidebar.button("Очистить историю"):
         st.session_state.messages = []
@@ -99,9 +119,12 @@ def main() -> None:
             "при первой загрузке модели. Можно попробовать другой метод в боковой панели."
         )
         st.stop()
-    if method in (DENSE, HYBRID):
-        dense = retriever.dense_retriever if method == HYBRID else retriever
+    if method in (DENSE, HYBRID, RERANKED):
+        base = retriever.hybrid_retriever if method == RERANKED else retriever
+        dense = base if method == DENSE else base.dense_retriever
         st.sidebar.caption(f"Embedding device: {dense.device}")
+    if method == RERANKED:
+        st.sidebar.caption(f"Reranker device: {retriever.reranker.device}")
 
     query = st.chat_input("Какое кино хочется посмотреть?")
     if query and query.strip():

@@ -383,3 +383,115 @@ retrievers без загрузки BGE-M3; интеграционные тест
 | 5 | — | Дежавю (2006)<br>0.453078 | Дежавю (2006)<br>0.015385; —/5 |
 
 </details>
+
+## Reranking
+
+Hybrid retrieval собирает кандидатов по лексическим и семантическим сигналам.
+Затем [BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+совместно оценивает каждую пару «query — passage» и переставляет кандидатов
+по relevance score. Это multilingual cross-encoder: он не строит embeddings
+и не просматривает весь корпус.
+
+```text
+Query
+ ├── BM25 ─────────┐
+ └── BGE-M3 dense ─┤
+                 RRF
+                  ↓
+                top-20
+                  ↓
+         BGE reranker v2 m3
+                  ↓
+                top-5
+```
+
+Используется официальный вариант inference через Transformers:
+`AutoTokenizer` + `AutoModelForSequenceClassification`, `eval()` и
+`torch.inference_mode()`. Sigmoid применяется к logits обученной модели;
+`reranker_score` находится в диапазоне 0..1, но не является калиброванной
+вероятностью. CUDA выбирается автоматически с FP16; без CUDA используется
+CPU с FP32. По умолчанию batch size = 4, максимальная длина пары = 512 токенов
+с padding/truncation. Очень длинные описания могут быть обрезаны.
+
+Passage совпадает с Dense: `title + what + about + why`, без `not_for`.
+В результатах остаются все metadata Hybrid, включая `rrf_score`, исходные
+BM25/Dense ранги и scores; добавляются `reranker_score` и `hybrid_rank`
+(позиция до перестановки, начиная с 1). Сортировка — reranker score по убыванию,
+при равенстве сохраняется порядок Hybrid. Повторные URL учитываются один раз,
+по первому вхождению; исходные candidate dicts не изменяются.
+
+```python
+from pathlib import Path
+from movie_rag.retrieval.bm25 import BM25Retriever, load_movies
+from movie_rag.retrieval.dense import DenseRetriever
+from movie_rag.retrieval.hybrid import HybridRetriever
+from movie_rag.retrieval.reranker import Reranker, RerankedHybridRetriever
+
+movies = load_movies(Path("data/processed/movies.jsonl"))
+hybrid = HybridRetriever(BM25Retriever(movies), DenseRetriever(movies))
+reranker = Reranker()
+retriever = RerankedHybridRetriever(hybrid, reranker, candidate_k=20)
+results = retriever.search("дорожное кино про дружбу", top_k=5)
+```
+
+`candidate_k` ограничивает объём reranking: при `top_k > candidate_k`
+возвращается не более `candidate_k` результатов. Поиск остаётся двухэтапным;
+модель не ищет пропущенные Hybrid фильмы. Пустые кандидаты, пустой запрос
+или `top_k=0` дают `[]` без scoring. Отрицательный `top_k`, неположительный
+`candidate_k` и некорректные параметры inference вызывают `ValueError`.
+Ошибки модели не маскируются старой Hybrid-выдачей.
+
+В Streamlit появился четвёртый режим **Hybrid + Reranker**. Основная оценка
+карточки — reranker score; в раскрывающемся блоке видны Hybrid rank, RRF,
+BM25 rank и Dense rank. BM25, Dense и Hybrid доступны отдельно; по умолчанию
+остаётся Dense. Reranker кэшируется через отдельный `st.cache_resource`,
+независимо от fingerprint корпуса, а Hybrid переиспользует существующие
+BM25/Dense ресурсы. Смена режима и rerun не загружают модель заново.
+
+```bash
+uv sync
+uv run streamlit run app.py
+
+# Все 12 запросов из ТЗ: Hybrid top-5, Reranked top-5, перемещения и latency
+uv run python -m movie_rag.retrieval.reranker
+
+# Один запрос, свой бюджет кандидатов и размер batch
+uv run python -m movie_rag.retrieval.reranker "программист хакер" --candidate-k 20 --top-k 5 --batch-size 4
+
+# CPU для reranker (Dense сохраняет собственный автоматический выбор устройства)
+uv run python -m movie_rag.retrieval.reranker "хоррор" --device cpu
+
+# Машиночитаемый отчёт: кандидаты, результаты и отдельные времена этапов
+uv run python -m movie_rag.retrieval.reranker --output-json /tmp/reranker-comparison.json
+
+uv run pytest -q
+uv run ruff check .
+```
+
+CLI принимает также `--corpus`, `--cache-dir`, `--max-length`.
+Загрузка обеих моделей и инициализация индексов измеряются отдельно (`setup`).
+Hybrid выполняется один раз на запрос; его top-20 используется и для сравнения,
+и для reranking. Время reranker включает токенизацию, inference, перенос scores
+на CPU и сортировку. Первый запрос может включать прогрев CUDA; эти числа
+не следует считать универсальной производительностью сервиса.
+
+Unit tests используют fake scorer и не скачивают модель. Проверяются
+сортировка, лимиты, исходные ранги и metadata, отсутствие мутаций, дедупликация,
+пустой/одиночный candidate, текст passage, бюджет кандидатов, CPU/CUDA dtype,
+батчи, CLI и повторное использование ресурсов в UI.
+
+### Результаты проверки reranker
+
+[Полный отчёт по 12 запросам: Hybrid/Reranked top-5, перемещения, latency и failure cases](reports/reranker-comparison.md).
+Проверено на 500 фильмах, CUDA, RTX 5060 Ti 16 ГБ, FP16; `candidate_k=20`,
+`top_k=5`, batch size 4, max length 512. Медиана: Hybrid **14,6 мс**,
+reranker **107,3 мс**, сумма этапов **120,3 мс**, без загрузки моделей.
+Также прошли реальный CPU inference в FP32 и Streamlit AppTest с настоящими моделями.
+
+«Дом храбрых» сохранил **Hybrid #1 → Reranked #1** для запроса о послевоенной
+адаптации. Для «роуд-муви» «Взрослые игры» поднялись **6 → 5**, и в top-5
+оказались все пять фильмов сильного BM25 baseline. Но для «неглупый ужастик»
+первой стала драма «Обнаженная», а для «дорожное кино про дружбу» — романтическая
+история «Влюблённые». Reranking работает технически, но не гарантирует улучшения
+релевантности; низкие scores не интерпретируются как вероятность и не используются
+для отсечения результатов.
